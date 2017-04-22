@@ -9,6 +9,7 @@
  */
 'use strict';
 
+import type {GlobalConfig} from 'types/Config';
 import type {
   AggregatedResult,
   AssertionResult,
@@ -22,9 +23,9 @@ const chalk = require('chalk');
 const {ICONS} = require('../constants');
 
 class VerboseReporter extends DefaultReporter {
-  _options: Config;
+  _options: GlobalConfig;
 
-  constructor(options: Config) {
+  constructor(options: GlobalConfig) {
     super();
     this._options = options;
   }

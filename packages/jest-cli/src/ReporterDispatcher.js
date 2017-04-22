@@ -10,10 +10,12 @@
 
 'use strict';
 
-import type {RunnerContext} from 'types/Reporters';
-import type {HasteFS} from 'types/HasteMap';
-import type {Config, Path} from 'types/Config';
+import type {GlobalConfig} from 'types/Config';
+import type {Context} from 'types/Context';
+import type {Test} from 'types/TestRunner';
 import type {TestResult, AggregatedResult} from 'types/TestResult';
+import type BaseReporter from './reporters/BaseReporter';
+import type {ReporterOnStartOptions} from 'types/Reporters';
 
 export type RunOptions = {
   estimatedTime: number,
@@ -22,88 +24,62 @@ export type RunOptions = {
 
 class ReporterDispatcher {
   _disabled: boolean;
-  _reporters: Array<Object>;
-  _runnerContext: RunnerContext;
-  _requiredMethods: Array<string>;
+  _reporters: Array<BaseReporter>;
 
-  constructor(hasteFS: HasteFS, getTestSummary: () => string) {
-    this._runnerContext = {getTestSummary, hasteFS};
+  constructor() {
     this._reporters = [];
   }
 
-  register(reporter: Object): void {
+  register(reporter: BaseReporter): void {
     this._reporters.push(reporter);
   }
 
-  unregister(ReporterClass: Function): void {
+  unregister(ReporterClass: Function) {
     this._reporters = this._reporters.filter(
       reporter => !(reporter instanceof ReporterClass),
     );
   }
 
   onTestResult(
-    config: Config,
+    test: Test,
     testResult: TestResult,
     results: AggregatedResult,
   ) {
-    this._callReporterMethod('onTestResult', [
-      config,
-      testResult,
-      results,
-      this._runnerContext,
-    ]);
+    this._reporters.forEach(reporter =>
+      reporter.onTestResult(test, testResult, results),
+    );
   }
 
-  onTestStart(config: Config, path: Path) {
-    this._callReporterMethod('onTestStart', [
-      config,
-      path,
-      this._runnerContext,
-    ]);
+  onTestStart(test: Test) {
+    this._reporters.forEach(reporter => reporter.onTestStart(test));
   }
 
-  onRunStart(config: Config, results: AggregatedResult, options: RunOptions) {
-    this._callReporterMethod('onRunStart', [
-      config,
-      results,
-      this._runnerContext,
-      options,
-    ]);
+  onRunStart(
+    config: GlobalConfig,
+    results: AggregatedResult,
+    options: ReporterOnStartOptions,
+  ) {
+    this._reporters.forEach(reporter =>
+      reporter.onRunStart(config, results, options),
+    );
   }
 
-  onRunComplete(config: Config, results: AggregatedResult) {
-    this._callReporterMethod('onRunComplete', [
-      config,
-      results,
-      this._runnerContext,
-    ]);
-  }
-
-  /**
-   * Helper mehtod to call only the methods that exist
-   * on a given reporter
-   *
-   * @private
-   * @param {string} method name of the mehtod to be called
-   * @param {Array<any>} reporterArgs arguments passed in to call the reporter
-   */
-  _callReporterMethod(method: string, reporterArgs: Array<any>) {
-    this._reporters.forEach(reporter => {
-      if (reporter[method]) {
-        reporter[method].apply(reporter, reporterArgs);
-      }
-    });
+  onRunComplete(
+    contexts: Set<Context>,
+    config: GlobalConfig,
+    results: AggregatedResult,
+  ) {
+    this._reporters.forEach(reporter =>
+      reporter.onRunComplete(contexts, config, results),
+    );
   }
 
   // Return a list of last errors for every reporter
   getErrors(): Array<Error> {
-    return this._reporters.reduce(
-      (list, reporter) => {
-        const error = reporter.getLastError && reporter.getLastError();
-        return error ? list.concat(error) : list;
-      },
-      [],
-    );
+    return this._reporters.reduce((list, reporter) => {
+      const error = reporter.getLastError();
+      return error ? list.concat(error) : list;
+    }, []);
   }
 
   hasErrors(): boolean {

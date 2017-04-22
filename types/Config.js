@@ -42,6 +42,7 @@ export type GlobalConfig = {
   noStackTrace: boolean,
   notify: boolean,
   replname: ?string,
+  reporters: Array<ReporterConfig>,
   rootDir: Path,
   silent: boolean,
   testNamePattern: string,

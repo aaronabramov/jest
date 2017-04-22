@@ -16,7 +16,6 @@ import type {
 } from 'types/TestResult';
 import type {Config, GlobalConfig, ReporterConfig} from 'types/Config';
 import type {Context} from 'types/Context';
-import type {Context} from 'types/Context';
 import type {PathPattern} from './SearchSource';
 import type {Test, Tests} from 'types/TestRunner';
 
@@ -314,7 +313,7 @@ class TestRunner {
     }
   }
 
-  _setupDefaultReporters(config: Config) {
+  _setupDefaultReporters(config: GlobalConfig) {
     this.addReporter(
       config.verbose ? new VerboseReporter(config) : new DefaultReporter(),
     );
