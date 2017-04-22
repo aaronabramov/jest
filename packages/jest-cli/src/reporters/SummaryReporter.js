@@ -10,8 +10,11 @@
 'use strict';
 
 import type {AggregatedResult, SnapshotSummary} from 'types/TestResult';
-import type {Config} from 'types/Config';
-import type {ReporterOnStartOptions, RunnerContext} from 'types/Reporters';
+import type {GlobalConfig} from 'types/Config';
+import type {Context} from 'types/Context';
+import type {Options as SummaryReporterOptions} from '../TestRunner';
+import type {PathPattern} from '../SearchSource';
+import type {ReporterOnStartOptions} from 'types/Reporters';
 
 const BaseReporter = require('./BaseReporter');
 
@@ -55,11 +58,13 @@ const NPM_EVENTS = new Set([
   'postrestart',
 ]);
 
-class SummareReporter extends BaseReporter {
+class SummaryReporter extends BaseReporter {
   _estimatedTime: number;
+  _options: SummaryReporterOptions;
 
-  constructor() {
+  constructor(options: SummaryReporterOptions) {
     super();
+    this._options = options;
     this._estimatedTime = 0;
   }
 
@@ -75,19 +80,18 @@ class SummareReporter extends BaseReporter {
   }
 
   onRunStart(
-    config: Config,
+    config: GlobalConfig,
     aggregatedResults: AggregatedResult,
-    runnerContext: RunnerContext,
     options: ReporterOnStartOptions,
   ) {
-    super.onRunStart(config, aggregatedResults, runnerContext, options);
+    super.onRunStart(config, aggregatedResults, options);
     this._estimatedTime = options.estimatedTime;
   }
 
   onRunComplete(
-    config: Config,
+    contexts: Set<Context>,
+    config: GlobalConfig,
     aggregatedResults: AggregatedResult,
-    runnerContext: RunnerContext,
   ) {
     const {numTotalTestSuites, testResults, wasInterrupted} = aggregatedResults;
     if (numTotalTestSuites) {
@@ -109,7 +113,12 @@ class SummareReporter extends BaseReporter {
       if (numTotalTestSuites) {
         const testSummary = wasInterrupted
           ? chalk.bold.red('Test run was interrupted.')
-          : runnerContext.getTestSummary();
+          : this._getTestSummary(
+              contexts,
+              this._options.pattern,
+              this._options.testNamePattern,
+              this._options.testPathPattern,
+            );
         this.log(
           getSummary(aggregatedResults, {
             estimatedTime: this._estimatedTime,
@@ -121,7 +130,7 @@ class SummareReporter extends BaseReporter {
     }
   }
 
-  _printSnapshotSummary(snapshots: SnapshotSummary, config: Config) {
+  _printSnapshotSummary(snapshots: SnapshotSummary, config: GlobalConfig) {
     if (
       snapshots.added ||
       snapshots.filesRemoved ||
@@ -206,7 +215,7 @@ class SummareReporter extends BaseReporter {
     }
   }
 
-  _printSummary(aggregatedResults: AggregatedResult, config: Config) {
+  _printSummary(aggregatedResults: AggregatedResult, config: GlobalConfig) {
     // If there were any failing tests and there was a large number of tests
     // executed, re-print the failing results at the end of execution output.
     const failedTests = aggregatedResults.numFailedTests;
@@ -227,6 +236,33 @@ class SummareReporter extends BaseReporter {
       this.log(''); // print empty line
     }
   }
+
+  _getTestSummary(
+    contexts: Set<Context>,
+    pattern: PathPattern,
+    testNamePattern: string,
+    testPathPattern: string,
+  ) {
+    const testInfo = pattern.onlyChanged
+      ? chalk.dim(' related to changed files')
+      : pattern.input !== '' ? chalk.dim(' matching ') + testPathPattern : '';
+
+    const nameInfo = testNamePattern
+      ? chalk.dim(' with tests matching ') + `"${testNamePattern}"`
+      : '';
+
+    const contextInfo = contexts.size > 1
+      ? chalk.dim(' in ') + contexts.size + chalk.dim(' projects')
+      : '';
+
+    return (
+      chalk.dim('Ran all test suites') +
+      testInfo +
+      nameInfo +
+      contextInfo +
+      chalk.dim('.')
+    );
+  }
 }
 
-module.exports = SummareReporter;
+module.exports = SummaryReporter;

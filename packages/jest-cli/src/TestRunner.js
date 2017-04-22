@@ -14,8 +14,10 @@ import type {
   SerializableError as TestError,
   TestResult,
 } from 'types/TestResult';
-import type {Config, ReporterConfig} from 'types/Config';
+import type {Config, GlobalConfig, ReporterConfig} from 'types/Config';
 import type {Context} from 'types/Context';
+import type {Context} from 'types/Context';
+import type {PathPattern} from './SearchSource';
 import type {Test, Tests} from 'types/TestRunner';
 
 const {formatExecError} = require('jest-message-util');
@@ -43,9 +45,12 @@ class CancelRun extends Error {
   }
 }
 
-type Options = {|
+export type Options = {|
   maxWorkers: number,
-  getTestSummary: () => string,
+  pattern: PathPattern,
+  startRun: () => *,
+  testNamePattern: string,
+  testPathPattern: string,
 |};
 
 type OnTestFailure = (test: Test, err: TestError) => void;
@@ -54,26 +59,14 @@ type OnTestSuccess = (test: Test, result: TestResult) => void;
 const TEST_WORKER_PATH = require.resolve('./TestWorker');
 
 class TestRunner {
-  _context: Context;
-  _config: Config;
+  _config: GlobalConfig;
   _options: Options;
-  _startRun: () => *;
   _dispatcher: ReporterDispatcher;
 
-  constructor(
-    hasteContext: Context,
-    config: Config,
-    options: Options,
-    startRun: () => *,
-  ) {
+  constructor(config: GlobalConfig, options: Options) {
     this._config = config;
-    this._dispatcher = new ReporterDispatcher(
-      hasteContext.hasteFS,
-      options.getTestSummary,
-    );
-    this._context = hasteContext;
+    this._dispatcher = new ReporterDispatcher();
     this._options = options;
-    this._startRun = startRun;
     this._setupReporters();
   }
 
@@ -87,13 +80,14 @@ class TestRunner {
 
   async runTests(tests: Tests, watcher: TestWatcher) {
     const timings = [];
+    const contexts = new Set();
     tests.forEach(test => {
+      contexts.add(test.context);
       if (test.duration) {
         timings.push(test.duration);
       }
     });
 
-    const config = this._config;
     const aggregatedResults = createAggregatedResults(tests.length);
     const estimatedTime = Math.ceil(
       getEstimatedTime(timings, this._options.maxWorkers) / 1000,
@@ -102,7 +96,8 @@ class TestRunner {
     // Run in band if we only have one test or one worker available.
     // If we are confident from previous runs that the tests will finish quickly
     // we also run in band to reduce the overhead of spawning workers.
-    const runInBand = this._options.maxWorkers <= 1 ||
+    const runInBand =
+      this._options.maxWorkers <= 1 ||
       tests.length <= 1 ||
       (tests.length <= 20 &&
         timings.length > 0 &&
@@ -121,8 +116,8 @@ class TestRunner {
         return;
       }
       addResult(aggregatedResults, testResult);
-      this._dispatcher.onTestResult(config, testResult, aggregatedResults);
-      this._bailIfNeeded(aggregatedResults, watcher);
+      this._dispatcher.onTestResult(test, testResult, aggregatedResults);
+      this._bailIfNeeded(contexts, aggregatedResults, watcher);
     };
 
     const onFailure = (test: Test, error: TestError) => {
@@ -132,27 +127,29 @@ class TestRunner {
       const testResult = buildFailureTestResult(test.path, error);
       testResult.failureMessage = formatExecError(
         testResult,
-        test.config,
+        test.context.config,
         test.path,
       );
       addResult(aggregatedResults, testResult);
-      this._dispatcher.onTestResult(config, testResult, aggregatedResults);
+      this._dispatcher.onTestResult(test, testResult, aggregatedResults);
     };
 
     const updateSnapshotState = () => {
-      const status = snapshot.cleanup(
-        this._context.hasteFS,
-        config.updateSnapshot,
-      );
-      aggregatedResults.snapshot.filesRemoved += status.filesRemoved;
-      aggregatedResults.snapshot.didUpdate = config.updateSnapshot;
-      aggregatedResults.snapshot.failure = !!(!config.updateSnapshot &&
+      contexts.forEach(context => {
+        const status = snapshot.cleanup(
+          context.hasteFS,
+          this._config.updateSnapshot,
+        );
+        aggregatedResults.snapshot.filesRemoved += status.filesRemoved;
+      });
+      aggregatedResults.snapshot.didUpdate = this._config.updateSnapshot;
+      aggregatedResults.snapshot.failure = !!(!this._config.updateSnapshot &&
         (aggregatedResults.snapshot.unchecked ||
           aggregatedResults.snapshot.unmatched ||
           aggregatedResults.snapshot.filesRemoved));
     };
 
-    this._dispatcher.onRunStart(config, aggregatedResults, {
+    this._dispatcher.onRunStart(this._config, aggregatedResults, {
       estimatedTime,
       showStatus: !runInBand,
     });
@@ -170,7 +167,7 @@ class TestRunner {
     updateSnapshotState();
     aggregatedResults.wasInterrupted = watcher.isInterrupted();
 
-    this._dispatcher.onRunComplete(config, aggregatedResults);
+    this._dispatcher.onRunComplete(contexts, this._config, aggregatedResults);
 
     const anyTestFailures = !(aggregatedResults.numFailedTests === 0 &&
       aggregatedResults.numRuntimeErrorTestSuites === 0);
@@ -199,11 +196,16 @@ class TestRunner {
                 throw new CancelRun();
               }
 
-              this._dispatcher.onTestStart(test.config, test.path);
-              return runTest(test.path, test.config, this._context.resolver);
+              this._dispatcher.onTestStart(test);
+              return runTest(
+                test.path,
+                test.context.config,
+                test.context.resolver,
+              );
             })
             .then(result => onResult(test, result))
-            .catch(err => onFailure(test, err))),
+            .catch(err => onFailure(test, err)),
+        ),
       Promise.resolve(),
     );
   }
@@ -228,17 +230,17 @@ class TestRunner {
 
     // Send test suites to workers continuously instead of all at once to track
     // the start time of individual tests.
-    const runTestInWorker = ({config, path}) =>
+    const runTestInWorker = test =>
       mutex(() => {
         if (watcher.isInterrupted()) {
           return Promise.reject();
         }
-        this._dispatcher.onTestStart(config, path);
+        this._dispatcher.onTestStart(test);
         return worker({
-          config,
-          path,
+          config: test.context.config,
+          path: test.path,
           rawModuleMap: watcher.isWatchMode()
-            ? this._context.moduleMap.getRawModuleMap()
+            ? test.context.moduleMap.getRawModuleMap()
             : null,
         });
       });
@@ -248,7 +250,7 @@ class TestRunner {
       if (err.type === 'ProcessTerminatedError') {
         console.error(
           'A worker process has quit unexpectedly! ' +
-            'Most likely this an initialization error.',
+            'Most likely this is an initialization error.',
         );
         process.exit(1);
       }
@@ -266,14 +268,15 @@ class TestRunner {
       tests.map(test =>
         runTestInWorker(test)
           .then(testResult => onResult(test, testResult))
-          .catch(error => onError(error, test))),
+          .catch(error => onError(error, test)),
+      ),
     );
 
     const cleanup = () => workerFarm.end(farm);
     return Promise.race([runAllTests, onInterrupt]).then(cleanup, cleanup);
   }
 
-  /** 
+  /**
    * Checks if default reporters should be added or not
    * @private
    */
@@ -305,8 +308,9 @@ class TestRunner {
       this.addReporter(new CoverageReporter());
     }
 
+
     if (config.notify) {
-      this.addReporter(new NotifyReporter(this._startRun));
+      this.addReporter(new NotifyReporter(this._options.startRun));
     }
   }
 
@@ -315,7 +319,7 @@ class TestRunner {
       config.verbose ? new VerboseReporter(config) : new DefaultReporter(),
     );
 
-    this.addReporter(new SummaryReporter());
+    this.addReporter(new SummaryReporter(this._options));
   }
 
   /**
@@ -348,7 +352,7 @@ class TestRunner {
    *
    * Objects contain the following properties:
    *  - options
-   *  - path 
+   *  - path
    */
   _getReporterProps(reporter: ReporterConfig): Object {
     let props = {};
@@ -362,12 +366,20 @@ class TestRunner {
     return props;
   }
 
-  _bailIfNeeded(aggregatedResults: AggregatedResult, watcher: TestWatcher) {
+  _bailIfNeeded(
+    contexts: Set<Context>,
+    aggregatedResults: AggregatedResult,
+    watcher: TestWatcher,
+  ) {
     if (this._config.bail && aggregatedResults.numFailedTests !== 0) {
       if (watcher.isWatchMode()) {
         watcher.setState({interrupted: true});
       } else {
-        this._dispatcher.onRunComplete(this._config, aggregatedResults);
+        this._dispatcher.onRunComplete(
+          contexts,
+          this._config,
+          aggregatedResults,
+        );
         process.exit(1);
       }
     }
@@ -412,7 +424,8 @@ const addResult = (
   testResult: TestResult,
 ): void => {
   aggregatedResults.testResults.push(testResult);
-  aggregatedResults.numTotalTests += testResult.numPassingTests +
+  aggregatedResults.numTotalTests +=
+    testResult.numPassingTests +
     testResult.numFailingTests +
     testResult.numPendingTests;
   aggregatedResults.numFailedTests += testResult.numFailingTests;
@@ -450,7 +463,8 @@ const addResult = (
   aggregatedResults.snapshot.unchecked += testResult.snapshot.unchecked;
   aggregatedResults.snapshot.unmatched += testResult.snapshot.unmatched;
   aggregatedResults.snapshot.updated += testResult.snapshot.updated;
-  aggregatedResults.snapshot.total += testResult.snapshot.added +
+  aggregatedResults.snapshot.total +=
+    testResult.snapshot.added +
     testResult.snapshot.matched +
     testResult.snapshot.unmatched +
     testResult.snapshot.updated;
