@@ -7,23 +7,20 @@
  *
  * @flow
  */
-'use strict';
 
-import type {GlobalConfig, ProjectConfig} from 'types/Config';
 import type {Environment} from 'types/Environment';
+import type {GlobalConfig, ProjectConfig} from 'types/Config';
+import type {SnapshotState} from 'jest-snapshot';
 import type {TestResult} from 'types/TestResult';
 import type Runtime from 'jest-runtime';
 
-const JasmineReporter = require('./reporter');
-
-import jasmineAsync from './jasmine_async';
-import fs from 'graceful-fs';
 import path from 'path';
-import vm from 'vm';
+import JasmineReporter from './reporter';
+import jasmineAsync from './jasmine-async';
 
-const JASMINE_PATH = require.resolve('../vendor/jasmine-2.5.2.js');
+const JASMINE = require.resolve('./jasmine/jasmine-light.js');
 
-function jasmine2(
+async function jasmine2(
   globalConfig: GlobalConfig,
   config: ProjectConfig,
   environment: Environment,
@@ -36,14 +33,11 @@ function jasmine2(
     environment,
     testPath,
   );
-  const requireJasmine = runtime.requireInternalModule(JASMINE_PATH);
-  // environment.runScript(jasmineScript);
-
-  // const requireJasmine = environment.global.jasmineRequire;
-  const jasmine = requireJasmine.core(requireJasmine);
+  const jasmineFactory = runtime.requireInternalModule(JASMINE);
+  const jasmine = jasmineFactory.create();
 
   const env = jasmine.getEnv();
-  const jasmineInterface = requireJasmine.interface(jasmine, env);
+  const jasmineInterface = jasmineFactory.interface(jasmine, env);
   Object.assign(environment.global, jasmineInterface);
   env.addReporter(jasmineInterface.jsApiReporter);
 
@@ -56,6 +50,10 @@ function jasmine2(
   environment.global.describe.skip = environment.global.xdescribe;
   environment.global.describe.only = environment.global.fdescribe;
 
+  if (config.timers === 'fake') {
+    environment.fakeTimers.useFakeTimers();
+  }
+
   env.beforeEach(() => {
     if (config.resetModules) {
       runtime.resetModules();
@@ -67,17 +65,21 @@ function jasmine2(
 
     if (config.resetMocks) {
       runtime.resetAllMocks();
+
+      if (config.timers === 'fake') {
+        environment.fakeTimers.useFakeTimers();
+      }
     }
   });
 
   env.addReporter(reporter);
 
-  runtime.requireInternalModule(path.resolve(__dirname, './jest_expect.js'))({
+  runtime.requireInternalModule(path.resolve(__dirname, './jest-expect.js'))({
     expand: globalConfig.expand,
   });
 
-  const snapshotState = runtime.requireInternalModule(
-    path.resolve(__dirname, './setup_jest_globals.js'),
+  const snapshotState: SnapshotState = runtime.requireInternalModule(
+    path.resolve(__dirname, './setup-jest-globals.js'),
   )({
     config,
     globalConfig,
@@ -89,23 +91,19 @@ function jasmine2(
     runtime.requireModule(config.setupTestFrameworkScriptFile);
   }
 
-  if (config.timers === 'fake') {
-    environment.fakeTimers.useFakeTimers();
-  }
-
-  if (config.testNamePattern) {
-    const testNameRegex = new RegExp(config.testNamePattern, 'i');
+  if (globalConfig.testNamePattern) {
+    const testNameRegex = new RegExp(globalConfig.testNamePattern, 'i');
     env.specFilter = spec => testNameRegex.test(spec.getFullName());
   }
 
   runtime.requireModule(testPath);
-  env.execute();
+  await env.execute();
   return reporter
     .getResults()
-    .then(results => addSnapshotData(results, config, snapshotState));
+    .then(results => addSnapshotData(results, snapshotState));
 }
 
-const addSnapshotData = (results, config, snapshotState) => {
+const addSnapshotData = (results, snapshotState) => {
   results.testResults.forEach(({fullName, status}) => {
     if (status === 'pending' || status === 'failed') {
       // if test is skipped or failed, we don't want to mark
@@ -114,13 +112,12 @@ const addSnapshotData = (results, config, snapshotState) => {
     }
   });
 
-  const updateSnapshot = config.updateSnapshot;
   const uncheckedCount = snapshotState.getUncheckedCount();
-  if (updateSnapshot) {
+  if (uncheckedCount) {
     snapshotState.removeUncheckedKeys();
   }
-  const status = snapshotState.save(updateSnapshot);
 
+  const status = snapshotState.save();
   results.snapshot.fileDeleted = status.deleted;
   results.snapshot.added = snapshotState.added;
   results.snapshot.matched = snapshotState.matched;
