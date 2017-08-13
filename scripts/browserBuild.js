@@ -44,6 +44,7 @@ const babelEs5Options = Object.assign(
 );
 
 function browserBuild(pkgName, entryPath, destination) {
+  return Promise.resolve();
   return rollup({
     entry: entryPath,
     onwarn: () => {},
